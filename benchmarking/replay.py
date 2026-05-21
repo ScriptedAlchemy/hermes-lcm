@@ -41,6 +41,10 @@ def _safe_name(value: str) -> str:
     return safe or "replay"
 
 
+def _policy_run_key(policy: LCMPolicy) -> str:
+    return f"{_safe_name(policy.name)}__v{_safe_name(policy.policy_version)}"
+
+
 def deterministic_summary(
     *,
     text: str,
@@ -110,13 +114,14 @@ def _new_engine(policy: LCMPolicy, run_dir: Path):
     _ensure_hermes_lcm_package()
     from hermes_lcm.engine import LCMEngine
 
-    db_path = run_dir / f"{_safe_name(policy.name)}.lcm.db"
+    policy_key = _policy_run_key(policy)
+    db_path = run_dir / f"{policy_key}.lcm.db"
     hermes_home = run_dir / "hermes-home"
     hermes_home.mkdir(parents=True, exist_ok=True)
     config = _config_from_policy(policy, db_path)
     engine = LCMEngine(config=config, hermes_home=str(hermes_home))
-    session_id = f"bench-{_safe_name(policy.name)}"
-    conversation_id = f"bench-{_safe_name(policy.name)}"
+    session_id = f"bench-{policy_key}"
+    conversation_id = f"bench-{policy_key}"
     engine.on_session_start(
         session_id,
         platform="benchmark",
@@ -185,7 +190,7 @@ def run_replay(
     from hermes_lcm.tokens import count_messages_tokens
 
     root_dir = Path(output_dir)
-    run_dir = root_dir / _safe_name(fixture.name)
+    run_dir = root_dir / f"{_safe_name(fixture.name)}__{_policy_run_key(policy)}"
     run_dir.mkdir(parents=True, exist_ok=True)
     engine = _new_engine(policy, run_dir)
     start = time.perf_counter()
@@ -293,6 +298,5 @@ def run_replays(
     root = Path(output_dir)
     for fixture in fixtures:
         for policy in policies:
-            suite_dir = root / f"{_safe_name(fixture.name)}__{_safe_name(policy.name)}"
-            metrics.append(run_replay(fixture, policy, output_dir=suite_dir))
+            metrics.append(run_replay(fixture, policy, output_dir=root))
     return metrics

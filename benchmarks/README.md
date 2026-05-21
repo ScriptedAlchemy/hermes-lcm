@@ -43,7 +43,7 @@ The harness writes:
 
 - `metrics.jsonl`, one serialized replay result per fixture/policy pair
 - `summary.json`, aggregate provenance, metric summary, and ranked policy comparison
-- per-run `metrics.json` files under fixture/policy output directories
+- per-run `metrics.json` files under fixture/policy-version output directories, for example `fixture__policy__v1/metrics.json`
 
 Summary metadata includes:
 
