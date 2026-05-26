@@ -1,4 +1,3 @@
-
 """Hermes LCM Plugin — Lossless Context Management.
 
 Replaces the built-in ContextCompressor with a DAG-based context engine
@@ -20,10 +19,10 @@ def _env_flag_enabled(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _make_wrapped_handler(handler, engine):
-    """Wrap a raw lcm_* handler so kwargs['engine'] is always bound."""
-    def _wrapped(args, **kwargs):
-        return handler(args, engine=engine, **kwargs)
+def _make_wrapped_handler(tool_name: str, engine):
+    """Route a registered lcm_* tool through the engine dispatch path."""
+    def _wrapped(args: dict, **kwargs) -> str:
+        return engine.handle_tool_call(tool_name, args, **kwargs)
     return _wrapped
 
 
@@ -31,7 +30,6 @@ def register(ctx):
     """Plugin entry point — register the LCM context engine and tools."""
     from .config import LCMConfig
     from .engine import LCMEngine
-    from . import tools as lcm_tools
     from .schemas import (
         LCM_GREP,
         LCM_LOAD_SESSION,
@@ -58,8 +56,11 @@ def register(ctx):
     # Register as the context engine (replaces ContextCompressor)
     ctx.register_context_engine(engine)
 
-    # Register tools via the plugin registry so they are discoverable
-    # by the global tool system (not just the context-engine fallback).
+    # Register tools via the plugin registry so they are discoverable by
+    # hosts that support plugin-provided tool registration. Keep the
+    # context-engine toolset and dispatch path so platform_toolsets gating,
+    # schema deduplication, and live messages=... ingestion remain equivalent
+    # to Hermes Agent's native context-engine handling.
     _TOOLS = {
         "lcm_grep": LCM_GREP,
         "lcm_load_session": LCM_LOAD_SESSION,
@@ -69,14 +70,20 @@ def register(ctx):
         "lcm_status": LCM_STATUS,
         "lcm_doctor": LCM_DOCTOR,
     }
-    for name, schema in _TOOLS.items():
-        handler = getattr(lcm_tools, name)
-        ctx.register_tool(
-            name=name,
-            toolset="lcm",
-            schema=schema,
-            handler=_make_wrapped_handler(handler, engine),
-            description=schema.get("description", f"LCM tool: {name}"),
+    register_tool = getattr(ctx, "register_tool", None)
+    if callable(register_tool):
+        for name, schema in _TOOLS.items():
+            register_tool(
+                name=name,
+                toolset="context_engine",
+                schema=schema,
+                handler=_make_wrapped_handler(name, engine),
+                description=schema.get("description", ""),
+            )
+    else:
+        logger.info(
+            "LCM tool registration unavailable on this Hermes host; "
+            "continuing with context-engine schemas"
         )
 
     register_command = getattr(ctx, "register_command", None)
