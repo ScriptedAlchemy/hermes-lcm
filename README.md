@@ -2,8 +2,8 @@
   <img src="banner.png" alt="HERMES-LCM" width="800">
 </p>
 
-[![CI](https://github.com/stephenschoettler/hermes-lcm/actions/workflows/ci.yml/badge.svg)](https://github.com/stephenschoettler/hermes-lcm/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/stephenschoettler/hermes-lcm)](https://github.com/stephenschoettler/hermes-lcm/releases)
+[![CI](https://github.com/ScriptedAlchemy/hermes-lcm/actions/workflows/ci.yml/badge.svg)](https://github.com/ScriptedAlchemy/hermes-lcm/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/ScriptedAlchemy/hermes-lcm)](https://github.com/ScriptedAlchemy/hermes-lcm/releases)
 
 **Lossless Context Management plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent)**
 
@@ -75,19 +75,22 @@ claim that Hermes core has no persisted record of pre-compression history.
 
 ## Install
 
-Canonical install path: clone `hermes-lcm` as a general user plugin.
+Canonical install path for this Hermes setup: clone Zack's fork as a general user plugin.
 
 ```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
+git clone https://github.com/ScriptedAlchemy/hermes-lcm \
   ~/.hermes/plugins/hermes-lcm
 ```
 
 For a profile-specific install:
 
 ```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
+git clone https://github.com/ScriptedAlchemy/hermes-lcm \
   ~/.hermes/profiles/myprofile/plugins/hermes-lcm
 ```
+
+The original upstream remains `https://github.com/stephenschoettler/hermes-lcm`;
+keep it as an `upstream` remote when you want to manually merge new releases.
 
 From an existing checkout, install a symlink:
 
