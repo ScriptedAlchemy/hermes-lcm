@@ -50,6 +50,7 @@ compacted.
 - **Sensitive-pattern controls** - optional named redaction of API keys, bearer tokens, passwords, and private keys before LCM stores or summarizes them
 - **Storage-boundary payload guard** - media-ish `data:*;base64` and long base64-looking strings are externalized before LCM writes them to SQLite
 - **Diagnostics** - `lcm_status`, `lcm_doctor`, and optional `/lcm` slash commands
+- **Dashboard tab** - a plugin-owned `/lcm` page for read-only store, summary, and search inspection in `hermes dashboard`
 
 ## LCM vs built-in compression
 
@@ -155,6 +156,7 @@ Expected signals:
 - plugin list includes `hermes-lcm`
 - selected context engine is `lcm`
 - tool list includes `lcm_grep`, `lcm_load_session`, `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, and `lcm_doctor`
+- `hermes dashboard` shows the plugin-provided `LCM` tab at `/lcm`
 
 Typical output:
 
