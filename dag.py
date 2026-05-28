@@ -13,6 +13,7 @@ Depth semantics:
 
 import json
 import logging
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -46,6 +47,140 @@ from .store import _normalize_source_value, _UNKNOWN_SOURCE, _legacy_blank_sourc
 
 
 logger = logging.getLogger(__name__)
+
+
+_TAXONOMY_TAG_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("testing", ("test", "tests", "pytest", "fixture", "assert", "coverage", "regression")),
+    ("debugging", ("bug", "debug", "error", "exception", "traceback", "failure", "failing", "crash", "fix")),
+    ("code", ("code", "function", "class", "module", "import", "api", "refactor", "implementation", "patch")),
+    ("database", ("database", "sqlite", "sql", "schema", "migration", "fts", "query")),
+    ("operations", ("docker", "kubernetes", "deploy", "deployment", "ci", "server", "service", "runtime", "gateway")),
+    ("configuration", ("config", "configuration", "setting", "env", "environment", "profile", "preset")),
+    ("security", ("security", "secret", "token", "credential", "permission", "auth", "vulnerability", "sandbox")),
+    ("documentation", ("readme", "docs", "documentation", "guide", "manual")),
+    ("planning", ("plan", "planning", "todo", "roadmap", "proposal", "decision", "design")),
+)
+
+_TAXONOMY_CATEGORY_TAGS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("testing", ("testing",)),
+    ("debugging", ("debugging",)),
+    ("security", ("security",)),
+    ("documentation", ("documentation",)),
+    ("data", ("database",)),
+    ("operations", ("operations", "configuration")),
+    ("development", ("code",)),
+    ("planning", ("planning",)),
+)
+
+
+def _normalize_taxonomy_label(value: str) -> str:
+    return re.sub(r"[^a-z0-9_-]+", "-", str(value or "").strip().lower()).strip("-")
+
+
+def normalize_taxonomy_tags(value: Any) -> list[str]:
+    """Normalize a tag filter or stored tag list to deterministic labels."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = re.split(r"[\s,]+", value)
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = [str(item) for item in value]
+    else:
+        raw_items = [str(value)]
+
+    tags: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        label = _normalize_taxonomy_label(item)
+        if label and label not in seen:
+            tags.append(label)
+            seen.add(label)
+    return tags
+
+
+def _json_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+    else:
+        decoded = value
+    if not isinstance(decoded, list):
+        return []
+    result: list[str] = []
+    for item in decoded:
+        text = str(item or "").strip()
+        if text:
+            result.append(text)
+    return result
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+    else:
+        decoded = value
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def classify_summary_taxonomy(summary: str, expand_hint: str = "") -> dict[str, Any]:
+    """Return deterministic, conservative taxonomy metadata for a summary node."""
+    combined = f"{summary or ''}\n{expand_hint or ''}".strip()
+    lowered = combined.lower()
+    matched_terms: dict[str, list[str]] = {}
+    tags: list[str] = []
+
+    for tag, keywords in _TAXONOMY_TAG_KEYWORDS:
+        matches = [
+            keyword
+            for keyword in keywords
+            if re.search(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])", lowered)
+        ]
+        if matches:
+            tags.append(tag)
+            matched_terms[tag] = matches
+
+    category = "general"
+    tag_set = set(tags)
+    for candidate, candidate_tags in _TAXONOMY_CATEGORY_TAGS:
+        if any(tag in tag_set for tag in candidate_tags):
+            category = candidate
+            break
+
+    entities: list[str] = []
+    seen_entities: set[str] = set()
+    entity_patterns = (
+        r"`([^`\n]{2,80})`",
+        r"\b([A-Z][A-Za-z0-9]+(?:[A-Z][A-Za-z0-9]+)+)\b",
+        r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)\b",
+        r"\b([A-Za-z0-9_.-]+\.(?:py|ts|tsx|js|jsx|md|yaml|yml|json|toml|sql))\b",
+        r"(#[0-9]{1,10})\b",
+    )
+    for pattern in entity_patterns:
+        for match in re.finditer(pattern, combined):
+            entity = str(match.group(1)).strip()
+            if entity and entity not in seen_entities:
+                entities.append(entity)
+                seen_entities.add(entity)
+            if len(entities) >= 12:
+                break
+        if len(entities) >= 12:
+            break
+
+    return {
+        "category": category,
+        "tags": tags,
+        "entities": entities,
+        "metadata": {
+            "classifier": "deterministic:v1",
+            "source_fields": ["summary", "expand_hint"],
+            "matched_terms": matched_terms,
+        },
+    }
 
 
 def _build_search_order_by(sort: str | None, recency_expr: str) -> str:
@@ -145,6 +280,10 @@ class SummaryNode:
     earliest_at: float | None = None
     latest_at: float | None = None
     expand_hint: str = ""  # "Expand for details about: ..."
+    category: str = ""
+    tags: List[str] = field(default_factory=list)
+    entities: List[str] = field(default_factory=list)
+    taxonomy_metadata: Dict[str, Any] = field(default_factory=dict)
     search_rank: float | None = None
     search_directness: float = 0.0
 
@@ -173,7 +312,11 @@ class SummaryDAG:
                 created_at REAL NOT NULL,
                 earliest_at REAL,
                 latest_at REAL,
-                expand_hint TEXT DEFAULT ''
+                expand_hint TEXT DEFAULT '',
+                category TEXT NOT NULL DEFAULT 'general',
+                tags TEXT NOT NULL DEFAULT '[]',
+                entities TEXT NOT NULL DEFAULT '[]',
+                taxonomy_metadata TEXT NOT NULL DEFAULT '{}'
             );
             CREATE INDEX IF NOT EXISTS idx_nodes_session_depth
                 ON summary_nodes(session_id, depth, created_at);
@@ -189,6 +332,7 @@ class SummaryDAG:
         )
         run_versioned_migrations(self._conn)
         self._ensure_source_window_columns()
+        self._ensure_taxonomy_columns()
         self._conn.commit()
 
     def _ensure_source_window_columns(self) -> None:
@@ -203,15 +347,43 @@ class SummaryDAG:
             "CREATE INDEX IF NOT EXISTS idx_nodes_session_latest ON summary_nodes(session_id, latest_at, created_at)"
         )
 
+    def _ensure_taxonomy_columns(self) -> None:
+        columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(summary_nodes)").fetchall()
+        }
+        if "category" not in columns:
+            self._conn.execute("ALTER TABLE summary_nodes ADD COLUMN category TEXT NOT NULL DEFAULT 'general'")
+        if "tags" not in columns:
+            self._conn.execute("ALTER TABLE summary_nodes ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
+        if "entities" not in columns:
+            self._conn.execute("ALTER TABLE summary_nodes ADD COLUMN entities TEXT NOT NULL DEFAULT '[]'")
+        if "taxonomy_metadata" not in columns:
+            self._conn.execute("ALTER TABLE summary_nodes ADD COLUMN taxonomy_metadata TEXT NOT NULL DEFAULT '{}'")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_nodes_taxonomy_session_category ON summary_nodes(session_id, category, latest_at, created_at)"
+        )
+
     # -- Write --------------------------------------------------------------
 
     def add_node(self, node: SummaryNode) -> int:
         """Insert a summary node and return its node_id."""
+        if not node.category and not node.tags and not node.entities and not node.taxonomy_metadata:
+            taxonomy = classify_summary_taxonomy(node.summary, node.expand_hint)
+            node.category = taxonomy["category"]
+            node.tags = taxonomy["tags"]
+            node.entities = taxonomy["entities"]
+            node.taxonomy_metadata = taxonomy["metadata"]
+        else:
+            node.category = _normalize_taxonomy_label(node.category) or "general"
+            node.tags = normalize_taxonomy_tags(node.tags)
+            node.entities = _json_list(node.entities)
+            node.taxonomy_metadata = _json_object(node.taxonomy_metadata)
         cur = self._conn.execute(
             """INSERT INTO summary_nodes
                (session_id, depth, summary, token_count, source_token_count,
-                source_ids, source_type, created_at, earliest_at, latest_at, expand_hint)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                source_ids, source_type, created_at, earliest_at, latest_at, expand_hint,
+                category, tags, entities, taxonomy_metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 node.session_id,
                 node.depth,
@@ -224,6 +396,10 @@ class SummaryDAG:
                 node.earliest_at,
                 node.latest_at,
                 node.expand_hint,
+                node.category or "general",
+                json.dumps(node.tags),
+                json.dumps(node.entities),
+                json.dumps(node.taxonomy_metadata, sort_keys=True),
             ),
         )
         self._conn.commit()
@@ -330,7 +506,10 @@ class SummaryDAG:
 
     def search(self, query: str, session_id: str | None = None,
                limit: int = 20, sort: str | None = None,
-               source: str | None = None) -> List[SummaryNode]:
+               source: str | None = None,
+               category: str | None = None,
+               tags: list[str] | str | None = None,
+               tags_match: str = "any") -> List[SummaryNode]:
         """FTS5 search across summary nodes.
 
         Retrieval contract:
@@ -341,11 +520,23 @@ class SummaryDAG:
           session-level source presence
         - mixed-source nodes may match more than one ``source`` filter
         """
+        category = _normalize_taxonomy_label(category or "") or None
+        normalized_tags = normalize_taxonomy_tags(tags)
+        tags_match = "all" if tags_match == "all" else "any"
         safe_query = sanitize_fts5_query(query)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         if requires_like_fallback(query):
-            return self._search_like(query, session_id=session_id, limit=limit, sort=sort, source=source)
+            return self._search_like(
+                query,
+                session_id=session_id,
+                limit=limit,
+                sort=sort,
+                source=source,
+                category=category,
+                tags=normalized_tags,
+                tags_match=tags_match,
+            )
 
         order_by = _build_search_order_by(sort, "COALESCE(n.latest_at, n.created_at)")
         fetch_limit = compute_search_fetch_limit(limit, terms, phrases)
@@ -356,32 +547,43 @@ class SummaryDAG:
         scanned_rows = 0
         results: list[SummaryNode] = []
         source_match_cache: dict[int, bool] = {}
+        taxonomy_filter_active = bool(source or normalized_tags)
         while True:
             try:
+                where = ["nodes_fts MATCH ?"]
+                params: list[Any] = [safe_query]
                 if session_id is not None:
-                    rows = self._conn.execute(
-                        f"""SELECT n.*, rank as search_rank FROM nodes_fts fts
-                           JOIN summary_nodes n ON n.node_id = fts.rowid
-                           WHERE nodes_fts MATCH ? AND n.session_id = ?
-                           ORDER BY {order_by} LIMIT ? OFFSET ?""",
-                        (safe_query, session_id, fetch_limit, offset),
-                    ).fetchall()
-                else:
-                    rows = self._conn.execute(
-                        f"""SELECT n.*, rank as search_rank FROM nodes_fts fts
-                           JOIN summary_nodes n ON n.node_id = fts.rowid
-                           WHERE nodes_fts MATCH ?
-                           ORDER BY {order_by} LIMIT ? OFFSET ?""",
-                        (safe_query, fetch_limit, offset),
-                    ).fetchall()
+                    where.append("n.session_id = ?")
+                    params.append(session_id)
+                if category:
+                    where.append("n.category = ?")
+                    params.append(category)
+                rows = self._conn.execute(
+                    f"""SELECT n.*, rank as search_rank FROM nodes_fts fts
+                       JOIN summary_nodes n ON n.node_id = fts.rowid
+                       WHERE {' AND '.join(where)}
+                       ORDER BY {order_by} LIMIT ? OFFSET ?""",
+                    [*params, fetch_limit, offset],
+                ).fetchall()
                 scanned_rows += len(rows)
             except sqlite3.Error as exc:
                 logger.warning("FTS node search failed, falling back to LIKE: %s", exc)
-                return self._search_like(query, session_id=session_id, limit=limit, sort=sort, source=source)
+                return self._search_like(
+                    query,
+                    session_id=session_id,
+                    limit=limit,
+                    sort=sort,
+                    source=source,
+                    category=category,
+                    tags=normalized_tags,
+                    tags_match=tags_match,
+                )
 
             raw_nodes = [self._row_to_node(r) for r in rows]
             for node in raw_nodes:
                 if source and not self._node_matches_source(node.node_id, source, cache=source_match_cache):
+                    continue
+                if not self._node_matches_taxonomy(node, category=category, tags=normalized_tags, tags_match=tags_match):
                     continue
                 node.search_directness = compute_directness_score(node.summary, terms, phrases)
                 if apply_directness_adjustment and node.search_rank is not None:
@@ -391,7 +593,7 @@ class SummaryDAG:
             results.sort(key=lambda node: _fts_result_sort_key(node, sort))
 
             exhausted = len(rows) < fetch_limit or scanned_rows >= candidate_cap
-            if source and not exhausted:
+            if taxonomy_filter_active and not exhausted:
                 offset += len(rows)
                 remaining = candidate_cap - scanned_rows
                 if remaining <= 0:
@@ -416,12 +618,18 @@ class SummaryDAG:
 
     def _search_like(self, query: str, session_id: str | None = None,
                      limit: int = 20, sort: str | None = None,
-                     source: str | None = None) -> List[SummaryNode]:
+                     source: str | None = None,
+                     category: str | None = None,
+                     tags: list[str] | str | None = None,
+                     tags_match: str = "any") -> List[SummaryNode]:
         safe_query = sanitize_fts5_query(query)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         if not terms:
             return []
+        category = _normalize_taxonomy_label(category or "") or None
+        normalized_tags = normalize_taxonomy_tags(tags)
+        tags_match = "all" if tags_match == "all" else "any"
         fetch_limit = compute_search_fetch_limit(limit, terms, phrases)
 
         where: list[str] = ["summary IS NOT NULL"]
@@ -429,6 +637,9 @@ class SummaryDAG:
         if session_id is not None:
             where.append("session_id = ?")
             args.append(session_id)
+        if category:
+            where.append("category = ?")
+            args.append(category)
         like_clauses = []
         for term in terms:
             like_clauses.append("summary LIKE ? ESCAPE '\\'")
@@ -442,6 +653,7 @@ class SummaryDAG:
         scanned_rows = 0
         nodes: list[SummaryNode] = []
         source_match_cache: dict[int, bool] = {}
+        taxonomy_filter_active = bool(source or normalized_tags)
         while True:
             rows = self._conn.execute(
                 f"""SELECT * FROM summary_nodes
@@ -454,6 +666,8 @@ class SummaryDAG:
                 node = self._row_to_node(row)
                 if source and not self._node_matches_source(node.node_id, source, cache=source_match_cache):
                     continue
+                if not self._node_matches_taxonomy(node, category=category, tags=normalized_tags, tags_match=tags_match):
+                    continue
                 score = sum(
                     min(count_term_matches(node.summary, term), 1) if collapse_risky_repeats else count_term_matches(node.summary, term)
                     for term in terms
@@ -465,7 +679,7 @@ class SummaryDAG:
                 nodes.append(node)
 
             nodes.sort(key=lambda node: _fallback_result_sort_key(node, sort))
-            if not source or len(rows) < fetch_limit or scanned_rows >= candidate_cap:
+            if not taxonomy_filter_active or len(rows) < fetch_limit or scanned_rows >= candidate_cap:
                 return nodes[:limit]
 
             offset += len(rows)
@@ -536,6 +750,62 @@ class SummaryDAG:
             cache[node_id] = matched
         return matched
 
+    def _node_matches_taxonomy(
+        self,
+        node: SummaryNode,
+        *,
+        category: str | None = None,
+        tags: list[str] | None = None,
+        tags_match: str = "any",
+    ) -> bool:
+        if category and node.category != category:
+            return False
+        required_tags = set(tags or [])
+        if not required_tags:
+            return True
+        node_tags = set(normalize_taxonomy_tags(node.tags))
+        if tags_match == "all":
+            return required_tags.issubset(node_tags)
+        return bool(required_tags & node_tags)
+
+    def get_taxonomy_stats(self, session_id: str | None = None) -> dict[str, Any]:
+        where = []
+        args: list[Any] = []
+        if session_id is not None:
+            where.append("session_id = ?")
+            args.append(session_id)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        total = self._conn.execute(
+            f"SELECT COUNT(*) FROM summary_nodes {where_sql}",
+            args,
+        ).fetchone()[0]
+        category_rows = self._conn.execute(
+            f"""SELECT category, COUNT(*)
+                FROM summary_nodes {where_sql}
+                GROUP BY category
+                ORDER BY COUNT(*) DESC, category""",
+            args,
+        ).fetchall()
+        tag_counts: dict[str, int] = {}
+        tagged_nodes = 0
+        rows = self._conn.execute(
+            f"SELECT tags FROM summary_nodes {where_sql}",
+            args,
+        ).fetchall()
+        for row in rows:
+            row_tags = normalize_taxonomy_tags(_json_list(row[0] if row else "[]"))
+            if row_tags:
+                tagged_nodes += 1
+            for tag in row_tags:
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        return {
+            "total_nodes": int(total or 0),
+            "classified_nodes": int(total or 0),
+            "tagged_nodes": tagged_nodes,
+            "categories": {str(row[0] or "general"): int(row[1] or 0) for row in category_rows},
+            "tags": dict(sorted(tag_counts.items(), key=lambda item: (-item[1], item[0]))),
+        }
+
     def get_source_time_window(self, node_ids: List[int]) -> tuple[float | None, float | None]:
         if not node_ids:
             return None, None
@@ -567,6 +837,9 @@ class SummaryDAG:
                     "token_count": child_node.token_count,
                     "source_token_count": child_node.source_token_count,
                     "expand_hint": child_node.expand_hint,
+                    "category": child_node.category or "general",
+                    "tags": child_node.tags,
+                    "entities": child_node.entities,
                 })
 
         return {
@@ -579,6 +852,10 @@ class SummaryDAG:
             "earliest_at": node.earliest_at,
             "latest_at": node.latest_at,
             "expand_hint": node.expand_hint,
+            "category": node.category or "general",
+            "tags": node.tags,
+            "entities": node.entities,
+            "taxonomy_metadata": node.taxonomy_metadata,
             "children": children,
         }
 
@@ -598,7 +875,11 @@ class SummaryDAG:
             earliest_at=row[9],
             latest_at=row[10],
             expand_hint=row[11] or "",
-            search_rank=row[12] if len(row) > 12 else None,
+            category=row[12] if len(row) > 12 else "general",
+            tags=normalize_taxonomy_tags(_json_list(row[13] if len(row) > 13 else "[]")),
+            entities=_json_list(row[14] if len(row) > 14 else "[]"),
+            taxonomy_metadata=_json_object(row[15] if len(row) > 15 else "{}"),
+            search_rank=row[16] if len(row) > 16 else (row[12] if len(row) == 13 else None),
         )
 
     def close(self):

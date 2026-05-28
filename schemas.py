@@ -86,6 +86,30 @@ LCM_GREP = {
                     "naive ISO timestamps are rejected. When supplied, lcm_grep returns raw message hits only."
                 ),
             },
+            "category": {
+                "type": "string",
+                "description": (
+                    "Optional deterministic summary-node taxonomy category filter, for example development, "
+                    "testing, operations, data, documentation, security, planning, or general. "
+                    "Applies to current-session summary-node hits; raw-message hits are omitted when supplied."
+                ),
+            },
+            "tags": {
+                "anyOf": [
+                    {"type": "array", "items": {"type": "string"}},
+                    {"type": "string"},
+                ],
+                "description": (
+                    "Optional deterministic summary-node taxonomy tag filter. Accepts an array of tags or a "
+                    "comma-separated string. Applies to current-session summary-node hits; raw-message hits are omitted when supplied."
+                ),
+            },
+            "tags_match": {
+                "type": "string",
+                "enum": ["any", "all"],
+                "description": "Whether summary nodes must match any supplied tag or all supplied tags.",
+                "default": "any",
+            },
         },
         "required": ["query"],
     },
@@ -244,6 +268,7 @@ LCM_STATUS = {
     "description": (
         "Get a quick health overview of the LCM engine for the current session. "
         "Shows compression count, store size, DAG depth distribution, context usage, "
+        "summary-node taxonomy counts, "
         "active configuration, session/message filter state, and rotate snapshot "
         "state (last_rotate_at, rotate_backup_path, rotate_backup_size when a "
         "/lcm rotate apply has been run). Use this to understand how much history "

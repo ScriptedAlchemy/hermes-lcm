@@ -14,7 +14,7 @@ from .externalize import (
     find_externalized_payload_for_message,
     load_externalized_payload,
 )
-from .dag import build_nodes_fts_spec
+from .dag import build_nodes_fts_spec, normalize_taxonomy_tags
 from .db_bootstrap import check_external_content_fts_integrity, inspect_lcm_schema_health
 from .extraction import sanitize_pre_compaction_content
 from .ingest_protection import (
@@ -210,6 +210,38 @@ def _parse_grep_role(value: Any) -> tuple[str | None, str | None]:
     if role not in valid_roles:
         return None, "role must be one of: system, user, assistant, tool, unknown"
     return role, None
+
+
+def _parse_grep_category(value: Any) -> tuple[str | None, str | None]:
+    if value is None:
+        return None, None
+    labels = normalize_taxonomy_tags(str(value))
+    if not labels:
+        return None, "category must be a non-empty taxonomy label"
+    if len(labels) > 1:
+        return None, "category must be a single taxonomy label"
+    return labels[0], None
+
+
+def _parse_grep_tags(value: Any) -> tuple[list[str], str | None]:
+    if value is None:
+        return [], None
+    if isinstance(value, (str, list)):
+        tags = normalize_taxonomy_tags(value)
+    else:
+        return [], "tags must be an array of strings or a comma-separated string"
+    if not tags:
+        return [], "tags must include at least one non-empty taxonomy label"
+    return tags, None
+
+
+def _parse_tags_match(value: Any) -> tuple[str, str | None]:
+    if value is None:
+        return "any", None
+    mode = str(value or "").strip().lower()
+    if mode not in {"any", "all"}:
+        return "any", "tags_match must be one of: any, all"
+    return mode, None
 
 
 def _parse_strict_int(value: Any, name: str) -> tuple[int | None, str | None]:
@@ -524,6 +556,9 @@ def _expand_child_nodes(
                 "token_count": child.token_count,
                 "source_token_count": child.source_token_count,
                 "expand_hint": child.expand_hint,
+                "category": child.category or "general",
+                "tags": child.tags,
+                "entities": child.entities,
             }
         )
         budget_used += count_tokens(summary)
@@ -566,6 +601,9 @@ def _collect_context_blocks_for_node(
             "summary": summary,
             "summary_truncated": summary_truncated,
             "expand_hint": node.expand_hint,
+            "category": node.category or "general",
+            "tags": node.tags,
+            "entities": node.entities,
             "token_count": node.token_count,
         }
     ]
@@ -845,6 +883,16 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     if time_from is not None and time_to is not None and time_to < time_from:
         return json.dumps({"error": "time_to must be greater than or equal to time_from"})
     raw_message_filter_active = role is not None or time_from is not None or time_to is not None
+    category, category_error = _parse_grep_category(args.get("category"))
+    if category_error:
+        return json.dumps({"error": category_error})
+    tags, tags_error = _parse_grep_tags(args.get("tags"))
+    if tags_error:
+        return json.dumps({"error": tags_error})
+    tags_match, tags_match_error = _parse_tags_match(args.get("tags_match"))
+    if tags_match_error:
+        return json.dumps({"error": tags_match_error})
+    taxonomy_filter_active = category is not None or bool(tags)
 
     if requested_session_scope == "current":
         if explicit_session_id:
@@ -889,37 +937,38 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     has_current_session = bool(current_session_id)
     results: list[Dict[str, Any]] = []
 
-    try:
-        msg_hits = engine._store.search(
-            query,
-            session_id=search_session_id,
-            limit=source_limit,
-            sort=sort,
-            source=source,
-            role=role,
-            time_from=time_from,
-            time_to=time_to,
-        )
-        for hit in msg_hits:
-            timestamp_value = hit.get("timestamp", 0) or 0
-            results.append(
-                {
-                    "type": "message",
-                    "depth": "raw",
-                    "store_id": hit["store_id"],
-                    "session_id": hit["session_id"],
-                    "source": hit.get("source") or "",
-                    "role": hit["role"],
-                    "timestamp": timestamp_value,
-                    "snippet": hit.get("snippet", hit.get("content", "")[:200]),
-                    "from_current_session": has_current_session and hit["session_id"] == current_session_id,
-                    "_sort_ts": timestamp_value,
-                    "_sort_rank": hit.get("search_rank"),
-                    "_sort_directness": hit.get("_directness_score") or 0.0,
-                }
+    if not taxonomy_filter_active:
+        try:
+            msg_hits = engine._store.search(
+                query,
+                session_id=search_session_id,
+                limit=source_limit,
+                sort=sort,
+                source=source,
+                role=role,
+                time_from=time_from,
+                time_to=time_to,
             )
-    except Exception as exc:
-        logger.warning("Message search failed: %s", exc)
+            for hit in msg_hits:
+                timestamp_value = hit.get("timestamp", 0) or 0
+                results.append(
+                    {
+                        "type": "message",
+                        "depth": "raw",
+                        "store_id": hit["store_id"],
+                        "session_id": hit["session_id"],
+                        "source": hit.get("source") or "",
+                        "role": hit["role"],
+                        "timestamp": timestamp_value,
+                        "snippet": hit.get("snippet", hit.get("content", "")[:200]),
+                        "from_current_session": has_current_session and hit["session_id"] == current_session_id,
+                        "_sort_ts": timestamp_value,
+                        "_sort_rank": hit.get("search_rank"),
+                        "_sort_directness": hit.get("_directness_score") or 0.0,
+                    }
+                )
+        except Exception as exc:
+            logger.warning("Message search failed: %s", exc)
 
     # Summary-node search is intentionally current-session only. Cross-session
     # DAG expansion is deferred; returning summary hits without an expansion
@@ -934,6 +983,9 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
                 limit=source_limit,
                 sort=sort,
                 source=source,
+                category=category,
+                tags=tags,
+                tags_match=tags_match,
             )
             for node in node_hits:
                 results.append(
@@ -945,6 +997,9 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
                         "snippet": node.summary[:300],
                         "token_count": node.token_count,
                         "expand_hint": node.expand_hint,
+                        "category": node.category or "general",
+                        "tags": node.tags,
+                        "entities": node.entities,
                         "earliest_at": node.earliest_at,
                         "latest_at": node.latest_at,
                         "from_current_session": True,
@@ -977,10 +1032,15 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
         "sort": sort,
         "session_scope": session_scope,
         "source": source,
+        "category": category,
+        "tags": tags,
+        "tags_match": tags_match if tags else None,
         "limit": limit,
         "total_results": len(results),
         "results": results[:limit],
     }
+    if taxonomy_filter_active:
+        response["raw_results_omitted_due_to_taxonomy_filter"] = True
     if role is not None:
         response["role"] = role
     if time_from is not None:
@@ -989,6 +1049,10 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
         response["time_to"] = time_to
     if raw_message_filter_active:
         response["summary_results_omitted"] = True
+        response["summary_results_omitted_reason"] = "raw_message_filter_active"
+    elif taxonomy_filter_active and session_scope != "current":
+        response["summary_results_omitted"] = True
+        response["summary_results_omitted_reason"] = "taxonomy_filters_apply_to_current_session_summary_nodes"
     if session_scope == "session":
         response["session_id"] = explicit_session_id
     if requested_limit > _LCM_GREP_HARD_LIMIT_CAP:
@@ -1042,6 +1106,7 @@ def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
     overview = {
         "session_id": session_id,
         "store_message_count": engine._store.get_session_count(session_id),
+        "taxonomy": engine._dag.get_taxonomy_stats(session_id),
         "depths": {},
     }
 
@@ -1056,6 +1121,8 @@ def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
                     "node_id": node.node_id,
                     "token_count": node.token_count,
                     "expand_hint": node.expand_hint,
+                    "category": node.category or "general",
+                    "tags": node.tags,
                 }
                 for node in nodes[:20]
             ],
@@ -1512,6 +1579,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
     total_dag_tokens = sum(d["tokens"] for d in depths.values())
     total_source_tokens = sum(d["source_tokens"] for d in depths.values())
     compression_ratio = round(total_source_tokens / total_dag_tokens, 1) if total_dag_tokens > 0 else 0
+    taxonomy_stats = engine._dag.get_taxonomy_stats(session_id)
     full_status = engine.get_status()
     lifecycle = full_status.get("lifecycle")
     lifecycle_fragmentation = full_status.get("lifecycle_fragmentation")
@@ -1550,6 +1618,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
             "depths": {
                 f"d{depth}": info for depth, info in sorted(depths.items())
             },
+            "taxonomy": taxonomy_stats,
         },
         "config": {
             "fresh_tail_count": engine._config.fresh_tail_count,
@@ -1770,6 +1839,19 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     except Exception as e:
         checks.append({
             "check": "orphaned_dag_nodes",
+            "status": "fail",
+            "detail": str(e),
+        })
+
+    try:
+        checks.append({
+            "check": "summary_taxonomy",
+            "status": "pass",
+            "detail": engine._dag.get_taxonomy_stats(session_id),
+        })
+    except Exception as e:
+        checks.append({
+            "check": "summary_taxonomy",
             "status": "fail",
             "detail": str(e),
         })

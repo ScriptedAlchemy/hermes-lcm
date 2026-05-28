@@ -2797,6 +2797,79 @@ class TestSummaryDAG:
         assert node.earliest_at == 1_700_000_000
         assert node.latest_at == 1_800_000_000
 
+    def test_add_node_classifies_summary_taxonomy(self, dag):
+        node_id = dag.add_node(SummaryNode(
+            session_id="s1", depth=0,
+            summary="Pytest regression fix for `lcm_grep` in tools.py",
+            token_count=10, source_ids=[1], source_type="messages",
+            expand_hint="Expand for details about pytest assertions",
+        ))
+
+        node = dag.get_node(node_id)
+
+        assert node.category == "testing"
+        assert "testing" in node.tags
+        assert "debugging" in node.tags
+        assert "lcm_grep" in node.entities
+        assert "tools.py" in node.entities
+        assert node.taxonomy_metadata["classifier"] == "deterministic:v1"
+
+    def test_search_filters_summary_nodes_by_category_and_tags(self, dag):
+        dag.add_node(SummaryNode(
+            session_id="s1", depth=0,
+            summary="Docker deploy runtime incident with gateway config",
+            token_count=10, source_ids=[1], source_type="messages",
+        ))
+        dag.add_node(SummaryNode(
+            session_id="s1", depth=0,
+            summary="README documentation guide for gateway setup",
+            token_count=10, source_ids=[2], source_type="messages",
+        ))
+
+        ops_results = dag.search("gateway", session_id="s1", category="operations")
+        docs_results = dag.search("gateway", session_id="s1", tags=["documentation"])
+        all_tag_results = dag.search("gateway", session_id="s1", tags=["operations", "configuration"], tags_match="all")
+
+        assert [node.category for node in ops_results] == ["operations"]
+        assert [node.category for node in docs_results] == ["documentation"]
+        assert [node.category for node in all_tag_results] == ["operations"]
+
+    def test_search_like_fallback_filters_summary_nodes_by_tags(self, dag):
+        dag.add_node(SummaryNode(
+            session_id="s1", depth=0,
+            summary="SQLite schema migration query fallback",
+            token_count=10, source_ids=[1], source_type="messages",
+        ))
+        dag.add_node(SummaryNode(
+            session_id="s1", depth=0,
+            summary="Security token permission fallback",
+            token_count=10, source_ids=[2], source_type="messages",
+        ))
+
+        results = dag.search('fallback"query', session_id="s1", tags="database")
+
+        assert len(results) == 1
+        assert results[0].category == "data"
+
+    def test_taxonomy_stats_are_metadata_only_counts(self, dag):
+        dag.add_node(SummaryNode(
+            session_id="s1", depth=0,
+            summary="Docker deploy runtime config",
+            token_count=10, source_ids=[1], source_type="messages",
+        ))
+        dag.add_node(SummaryNode(
+            session_id="s1", depth=0,
+            summary="Plain conversation summary",
+            token_count=10, source_ids=[2], source_type="messages",
+        ))
+
+        stats = dag.get_taxonomy_stats("s1")
+
+        assert stats["total_nodes"] == 2
+        assert stats["categories"]["operations"] == 1
+        assert stats["categories"]["general"] == 1
+        assert stats["tags"]["operations"] == 1
+
     def test_existing_db_is_upgraded_with_summary_source_window_columns(self, tmp_path):
         db_path = tmp_path / "legacy_dag.db"
         conn = sqlite3.connect(db_path)
@@ -2836,6 +2909,10 @@ class TestSummaryDAG:
 
         assert "earliest_at" in columns
         assert "latest_at" in columns
+        assert "category" in columns
+        assert "tags" in columns
+        assert "entities" in columns
+        assert "taxonomy_metadata" in columns
 
         dag.close()
 

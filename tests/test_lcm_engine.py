@@ -950,6 +950,10 @@ class TestEngineABC:
         assert "source" in grep_props
         assert "descendant source lineage" in grep_props["source"]["description"]
         assert "unknown" in grep_props["source"]["description"]
+        assert "category" in grep_props
+        assert "tags" in grep_props
+        assert "tags_match" in grep_props
+        assert grep_props["tags_match"]["enum"] == ["any", "all"]
         # The default scope still steers callers to the active session.
         description_lower = grep_schema["description"].lower()
         assert (
@@ -4852,6 +4856,9 @@ class TestSessionRollover:
                 "snippet": "phoenix retained rollover summary",
                 "token_count": 7,
                 "expand_hint": "",
+                "category": "general",
+                "tags": [],
+                "entities": [],
                 "earliest_at": None,
                 "latest_at": None,
                 "from_current_session": True,
@@ -12461,6 +12468,7 @@ class TestEngineTools:
         assert result["store"]["messages"] == 1
         assert result["dag"]["total_nodes"] == 1
         assert "d0" in result["dag"]["depths"]
+        assert result["dag"]["taxonomy"]["categories"]["general"] == 1
         assert result["config"]["fresh_tail_count"] == engine._config.fresh_tail_count
         assert result["session_filters"]["ignored"] is False
         assert result["source_lineage"]["messages_total"] == 1
@@ -12522,6 +12530,7 @@ class TestEngineTools:
         assert "nodes_fts_integrity" in check_names
         assert "fts_index_sync" in check_names
         assert "orphaned_dag_nodes" in check_names
+        assert "summary_taxonomy" in check_names
         assert "config_validation" in check_names
         assert all(c["status"] == "pass" for c in result["checks"])
 
@@ -12899,6 +12908,64 @@ class TestHandleGrepCrossSession:
         result = json.loads(engine.handle_tool_call("lcm_grep", {"query": "docker"}))
         types_seen = {hit["type"] for hit in result["results"]}
         assert "summary" in types_seen
+
+    def test_taxonomy_filters_return_current_summary_hits_only(self, engine):
+        engine._store.append("test-session", {"role": "user", "content": "docker gateway raw"})
+        engine._dag.add_node(
+            SummaryNode(
+                session_id="test-session",
+                depth=0,
+                summary="Docker deploy runtime gateway config",
+                token_count=5,
+                source_token_count=5,
+                source_ids=[1],
+                source_type="messages",
+                created_at=time.time(),
+            )
+        )
+        engine._dag.add_node(
+            SummaryNode(
+                session_id="test-session",
+                depth=0,
+                summary="README documentation guide for gateway",
+                token_count=5,
+                source_token_count=5,
+                source_ids=[1],
+                source_type="messages",
+                created_at=time.time(),
+            )
+        )
+
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_grep",
+                {"query": "gateway", "category": "operations", "tags": ["configuration"], "tags_match": "all"},
+            )
+        )
+
+        assert result["category"] == "operations"
+        assert result["tags"] == ["configuration"]
+        assert result["raw_results_omitted_due_to_taxonomy_filter"] is True
+        assert result["total_results"] == 1
+        assert result["results"][0]["type"] == "summary"
+        assert result["results"][0]["category"] == "operations"
+        assert "configuration" in result["results"][0]["tags"]
+
+    def test_cross_session_taxonomy_filter_reports_summary_omission(self, engine):
+        engine._store.append("old-session", {"role": "user", "content": "docker gateway raw"})
+
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_grep",
+                {"query": "gateway", "session_scope": "all", "category": "operations"},
+            )
+        )
+
+        assert result["session_scope"] == "all"
+        assert result["results"] == []
+        assert result["raw_results_omitted_due_to_taxonomy_filter"] is True
+        assert result["summary_results_omitted"] is True
+        assert result["summary_results_omitted_reason"] == "taxonomy_filters_apply_to_current_session_summary_nodes"
 
     def test_source_filter_combined_with_scope_all(self, engine):
         engine._store.append("test-session", {"role": "user", "content": "docker via cli"}, source="cli")

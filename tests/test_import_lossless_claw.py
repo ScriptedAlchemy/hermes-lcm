@@ -427,6 +427,9 @@ def test_apply_imports_lossless_summaries_as_summary_nodes(tmp_path: Path):
             "token_count": 5,
             "source_token_count": 15,
             "expand_hint": "leaf hint",
+            "category": "general",
+            "tags": [],
+            "entities": [],
         }
     ]
     assert leaf["created_at"] == pytest.approx(1776686410.0)

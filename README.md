@@ -511,7 +511,7 @@ for earlier separate sessions or broad cross-session history.
 
 | Tool | Use |
 |------|-----|
-| `lcm_grep` | Search current-session raw messages and summaries. Opt into `session_scope='all'` or `session_scope='session'` (with `session_id`) for bounded archive recovery over rows already present in `lcm.db`, including externally backfilled rows that may carry source strings such as `openclaw-lcm:*`; broader scopes return raw-message hits only. Raw-message filters `role`, `time_from`, and `time_to` are pushed into the search query; when any of them is supplied, summary hits are omitted so the filter contract stays exact. Use `session_search` for earlier separate sessions or broad cross-session recall. |
+| `lcm_grep` | Search current-session raw messages and summaries. Opt into `session_scope='all'` or `session_scope='session'` (with `session_id`) for bounded archive recovery over rows already present in `lcm.db`, including externally backfilled rows that may carry source strings such as `openclaw-lcm:*`; broader scopes return raw-message hits only. Raw-message filters `role`, `time_from`, and `time_to` are pushed into the search query; when any of them is supplied, summary hits are omitted so the filter contract stays exact. Summary taxonomy filters `category`, `tags`, and `tags_match` constrain current-session summary-node retrieval and omit raw-message hits. Use `session_search` for earlier separate sessions or broad cross-session recall. |
 | `lcm_load_session` | Load one ordered raw-message transcript page for an explicit `session_id`. This is not search: it returns raw rows in `store_id` order, bounded by `limit`, with per-message content bounded by `max_content_chars`, and continues with `after_store_id` from `next_cursor`. |
 | `lcm_describe` | Inspect the current-session DAG or preview an `externalized_ref` without loading full content. |
 | `lcm_expand` | Recover source messages, child summaries, or externalized payloads with pagination. Use `store_id` to fetch a single raw message regardless of session, suitable for drilling into a cross-session `lcm_grep` result. |
@@ -536,6 +536,15 @@ message search query before result limiting. `time_from` and `time_to` accept Un
 seconds or timezone-aware ISO 8601 strings; naive ISO strings are rejected so the
 same query means the same thing across machines. When a raw-message filter is
 active, `lcm_grep` returns raw rows only and reports `summary_results_omitted`.
+
+Summary nodes also carry deterministic taxonomy metadata at creation time:
+`category`, `tags`, `entities`, and classifier metadata. This is a retrieval
+surface, not just display text: `lcm_grep(category=...)` and
+`lcm_grep(tags=[...], tags_match='any'|'all')` filter current-session summary
+hits before result limiting. Existing databases are upgraded with safe default
+taxonomy columns without reading old private summary text for backfill; newly
+created nodes are classified from their summary text and expand hint.
+`lcm_status` and `lcm_doctor` report category/tag counts as metadata-only stats.
 
 Carried-over summary nodes can become current-session content after `/new`, but
 their source eligibility still comes from the descendant raw messages. Expanding
